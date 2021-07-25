@@ -2,8 +2,9 @@
 import logging
 
 import numpy as np
+import numexpr as ne
 from numpy.matlib import repmat
-
+from numba import njit
 from dipy.sims.voxel import multi_tensor
 from dipy.core.geometry import cart2sphere
 from dipy.reconst.shm import lazy_index, normalize_data
@@ -503,8 +504,10 @@ def mbessel_ratio(n, x):
            doi: 10.1090/S0025-5718-1978-0470267-9
     '''
 
-    y = x / ((2*n + x) - (2*x * (n + 1/2) / (2*n + 1 + 2*x - (2*x*(n + 3/2) / (
-        2*n + 2 + 2*x - (2*x*(n + 5/2) / (2*n + 3 + 2*x)))))))
+    tmp = ne.evaluate('(2*x*(n + 3/2) / (2*n + 2 + 2*x - (2*x*(n + 5/2) / ' +
+                      '(2*n + 3 + 2*x))))')
+    y = ne.evaluate('x / ((2*n + x) - (2*x * (n + 1/2) /  ' +
+                    '(2*n + 1 + 2*x - tmp)))')
 
     return y
 
@@ -785,7 +788,7 @@ def rumba_deconv_global(data, kernel, mask, n_iter=600, recon_type='smf',
                          "dimensions are 1; " +
                          f"provided dimensions were {data.shape[:3]}")
 
-    epsilon = 1e-7
+    epsilon = np.float32(1e-7)
 
     n_grad = kernel.shape[0]  # gradient directions
     n_comp = kernel.shape[1]  # number of compartments
@@ -809,12 +812,8 @@ def rumba_deconv_global(data, kernel, mask, n_iter=600, recon_type='smf',
     index_mask = np.atleast_1d(np.squeeze(np.argwhere(mask_vec)))
     n_v_true = len(index_mask)  # number of target voxels
 
-    data_2d = np.zeros((n_v_true, n_grad), dtype=np.float32)
-    for i in range(n_grad):
-        data_2d[:, i] = np.ravel(data[:, :, :, i])[
-            index_mask]  # only keep voxels of interest
+    data_2d = _reshape_4d_2d(data, mask).T
 
-    data_2d = data_2d.T
     fodf = repmat(fodf0, 1, n_v_true)
     reblurred = np.matmul(kernel, fodf)
 
@@ -831,7 +830,7 @@ def rumba_deconv_global(data, kernel, mask, n_iter=600, recon_type='smf',
     sigma2 = sigma2 * np.ones(data_2d.shape, dtype=np.float32)
     tv_lambda_aux = np.zeros((n_v_tot), dtype=np.float32)
 
-    reblurred_s = data_2d * reblurred / sigma2
+    reblurred_s = ne.evaluate('data_2d * reblurred / sigma2')
 
     for i in range(n_iter):
         fodf_i = fodf
@@ -844,30 +843,30 @@ def rumba_deconv_global(data, kernel, mask, n_iter=600, recon_type='smf',
             fodf_4d = _reshape_2d_4d(fodf_i.T, mask)
             # Compute gradient, divergence
             gr = _grad(fodf_4d)
-            d_inv = 1 / np.sqrt(epsilon**2 + np.sum(gr**2, axis=3))
-            gr_norm = (gr * d_inv[:, :, :, None, :])
+            gr_mag = ne.evaluate('sum(gr**2, axis=3)')
+            d_inv = ne.evaluate('1 / sqrt(epsilon**2 + gr_mag)')
+            d_inv = d_inv[:, :, :, None, :]
+            gr_norm = ne.evaluate('gr * d_inv')
             div_f = _divergence(gr_norm)
-            g0 = np.abs(1 - tv_lambda * div_f)
-            tv_factor_4d = 1 / (g0 + _EPS)
+            g0 = ne.evaluate('abs(1 - tv_lambda * div_f)')
+            tv_factor_4d = ne.evaluate('1 / (g0 + _EPS)').astype(np.float32)
 
-            for j in range(n_comp):
-                tv_factor_1d = np.ravel(tv_factor_4d[:, :, :, j])[index_mask]
-                tv_factor[j, :] = tv_factor_1d
+            tv_factor = _reshape_4d_2d(tv_factor_4d, mask).T
 
             # Apply TV regularization to iteration factor
-            rl_factor = rl_factor * tv_factor
+            rl_factor = ne.evaluate('rl_factor * tv_factor')
 
-        fodf = fodf_i * rl_factor  # result of iteration
+        fodf = ne.evaluate('fodf_i * rl_factor')  # result of iteration
         fodf = np.maximum(f_zero, fodf)  # positivity constraint
 
         # Update other variables
         reblurred = np.matmul(kernel, fodf)
-        reblurred_s = data_2d * reblurred / sigma2
+        reblurred_s = ne.evaluate('data_2d * reblurred / sigma2')
 
         # Iterate variance
-        sigma2_i = (1 / (n_grad * n_order)) * \
-            np.sum((data_2d**2 + reblurred**2) / 2 - (
-                sigma2 * reblurred_s) * ratio, axis=0)
+        _ = ne.evaluate('sum((data_2d**2 + reblurred**2) / 2 - ' +
+                        '(sigma2 * reblurred_s) * ratio, axis=0)')
+        sigma2_i = ne.evaluate('(1 / (n_grad * n_order)) * _')
         sigma2_i = np.minimum((1 / 8)**2, np.maximum(sigma2_i, (1 / 80)**2))
 
         if verbose:
@@ -902,8 +901,10 @@ def rumba_deconv_global(data, kernel, mask, n_iter=600, recon_type='smf',
                                              ixmin[2]:ixmax[2]])
     fodf_wm = fodf_4d[:, :, :, :-1]  # WM compartment
     f_iso = fodf_4d[:, :, :, -1]  # isotropic compartment
-    f_wm = np.sum(fodf_wm, axis=3)  # white matter volume fraction
-    combined = fodf_wm + f_iso[..., None] / fodf_wm.shape[3]
+    f_wm = ne.evaluate('sum(fodf_wm, axis=3)')  # white matter volume fraction
+
+    f_iso_2d = f_iso[..., None]
+    combined = ne.evaluate('fodf_wm + f_iso_2d / (n_comp-1)')
 
     return fodf_wm, f_iso, f_wm, combined
 
@@ -915,11 +916,15 @@ def _grad(M):
     x_ind = list(range(1, M.shape[0])) + [M.shape[0]-1]
     y_ind = list(range(1, M.shape[1])) + [M.shape[1]-1]
     z_ind = list(range(1, M.shape[2])) + [M.shape[2]-1]
-
+    
+    Mx = M[x_ind, :, :, :]
+    My = M[:, y_ind, :, :]
+    Mz = M[:, :, z_ind, :]
+    
     grad = np.zeros((*M.shape[:3], 3, M.shape[-1]), dtype=np.float32)
-    grad[:, :, :, 0, :] = M[x_ind, :, :, :] - M
-    grad[:, :, :, 1, :] = M[:, y_ind, :, :] - M
-    grad[:, :, :, 2, :] = M[:, :, z_ind, :] - M
+    ne.evaluate('Mx - M', out=grad[:, :, :, 0, :])
+    ne.evaluate('My - M', out=grad[:, :, :, 1, :])
+    ne.evaluate('Mz - M', out=grad[:, :, :, 2, :])
 
     return grad
 
@@ -936,22 +941,34 @@ def _divergence(F):
     x_ind = [0] + list(range(F.shape[0]-1))
     y_ind = [0] + list(range(F.shape[1]-1))
     z_ind = [0] + list(range(F.shape[2]-1))
+    
+    Fxx = Fx[x_ind, :, :, :]
+    Fyy = Fy[:, y_ind, :, :]
+    Fzz = Fz[:, :, z_ind, :]
+    
+    fx = np.zeros((*F.shape[:3], F.shape[-1]), dtype=np.float32)
+    fy = np.zeros((*F.shape[:3], F.shape[-1]), dtype=np.float32)
+    fz = np.zeros((*F.shape[:3], F.shape[-1]), dtype=np.float32)
 
-    fx = Fx - Fx[x_ind, :, :, :]
+    ne.evaluate('Fx - Fxx', out=fx)
     fx[0, :, :, :] = Fx[0, :, :, :]  # edge conditions
     fx[-1, :, :, :] = -Fx[-2, :, :, :]
 
-    fy = Fy - Fy[:, y_ind, :, :]
+    ne.evaluate('Fy - Fyy', out=fy)
     fy[:, 0, :, :] = Fy[:, 0, :, :]
     fy[:, -1, :, :] = -Fy[:, -2, :, :]
 
-    fz = Fz - Fz[:, :, z_ind, :]
+    ne.evaluate('Fz - Fzz', out=fz)
     fz[:, :, 0, :] = Fz[:, :, 0, :]
     fz[:, :, -1, :] = -Fz[:, :, -2, :]
+    
+    div = np.zeros(fx.shape, dtype=np.float32)
+    ne.evaluate('fx + fy + fz', out=div)
 
-    return fx + fy + fz
+    return div
 
 
+@njit
 def _reshape_2d_4d(M, mask, out=None):
     if out is None:
         out = np.zeros((*mask.shape, M.shape[-1]), dtype=M.dtype)
@@ -960,4 +977,16 @@ def _reshape_2d_4d(M, mask, out=None):
         if mask[i, j, k]:
             out[i, j, k, :] = M[n, :]
             n += 1
+    return out
+
+
+@njit
+def _reshape_4d_2d(M, mask, out=None):
+    if out is None:
+        out = np.zeros((np.sum(mask), M.shape[-1]), dtype=M.dtype)
+    n = 0
+    for i, j, k in np.ndindex(mask.shape):
+        if mask[i, j, k]:
+            out[n, :] = M[i, j, k, :]
+            n = n + 1
     return out
