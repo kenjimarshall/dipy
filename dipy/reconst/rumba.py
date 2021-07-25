@@ -835,8 +835,9 @@ def rumba_deconv_global(data, kernel, mask, n_iter=600, recon_type='smf',
     for i in range(n_iter):
         fodf_i = fodf
         ratio = mbessel_ratio(n_order, reblurred_s).astype(np.float32)
-        rl_factor = np.matmul(kernel_t, data_2d*ratio) / \
-            (np.matmul(kernel_t, reblurred) + _EPS)
+        rl_factor_1 = np.matmul(kernel_t, data_2d*ratio)
+        rl_factor_2 = (np.matmul(kernel_t, reblurred) + _EPS)
+        rl_factor = ne.evaluate('rl_factor_1 / rl_factor_2')
 
         if use_tv:  # apply TV regularization
             tv_factor = np.ones(fodf_i.shape, dtype=np.float32)
@@ -916,11 +917,11 @@ def _grad(M):
     x_ind = list(range(1, M.shape[0])) + [M.shape[0]-1]
     y_ind = list(range(1, M.shape[1])) + [M.shape[1]-1]
     z_ind = list(range(1, M.shape[2])) + [M.shape[2]-1]
-    
+
     Mx = M[x_ind, :, :, :]
     My = M[:, y_ind, :, :]
     Mz = M[:, :, z_ind, :]
-    
+
     grad = np.zeros((*M.shape[:3], 3, M.shape[-1]), dtype=np.float32)
     ne.evaluate('Mx - M', out=grad[:, :, :, 0, :])
     ne.evaluate('My - M', out=grad[:, :, :, 1, :])
@@ -941,11 +942,11 @@ def _divergence(F):
     x_ind = [0] + list(range(F.shape[0]-1))
     y_ind = [0] + list(range(F.shape[1]-1))
     z_ind = [0] + list(range(F.shape[2]-1))
-    
+
     Fxx = Fx[x_ind, :, :, :]
     Fyy = Fy[:, y_ind, :, :]
     Fzz = Fz[:, :, z_ind, :]
-    
+
     fx = np.zeros((*F.shape[:3], F.shape[-1]), dtype=np.float32)
     fy = np.zeros((*F.shape[:3], F.shape[-1]), dtype=np.float32)
     fz = np.zeros((*F.shape[:3], F.shape[-1]), dtype=np.float32)
@@ -961,7 +962,7 @@ def _divergence(F):
     ne.evaluate('Fz - Fzz', out=fz)
     fz[:, :, 0, :] = Fz[:, :, 0, :]
     fz[:, :, -1, :] = -Fz[:, :, -2, :]
-    
+
     div = np.zeros(fx.shape, dtype=np.float32)
     ne.evaluate('fx + fy + fz', out=div)
 
