@@ -3,7 +3,6 @@ import logging
 
 import numpy as np
 import numexpr as ne
-from numpy.matlib import repmat
 from numba import njit
 from dipy.sims.voxel import multi_tensor
 from dipy.core.geometry import cart2sphere
@@ -814,7 +813,7 @@ def rumba_deconv_global(data, kernel, mask, n_iter=600, recon_type='smf',
 
     data_2d = _reshape_4d_2d(data, mask).T
 
-    fodf = repmat(fodf0, 1, n_v_true)
+    fodf = np.tile(fodf0, (1, n_v_true))
     reblurred = np.matmul(kernel, fodf)
 
     # For use later
@@ -878,8 +877,8 @@ def rumba_deconv_global(data, kernel, mask, n_iter=600, recon_type='smf',
             logger.info(
                 "Mean SNR (S0/sigma) estimated to be %.3f +/- %.3f",
                 snr_mean, snr_std)
-
-        sigma2 = repmat(sigma2_i, data_2d.shape[0], 1)  # expand into matrix
+        # Expand into matrix
+        sigma2 = np.tile(sigma2_i[None, :], (data_2d.shape[0], 1))
 
         # Update TV regularization strength using the discrepancy principle
         if use_tv:
